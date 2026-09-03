@@ -37,7 +37,7 @@ services:
   - type: web
     name: claude-notes-mcp-server
     runtime: python
-    repo: https://github.com/eoxssecondbrain/claude-notes-vault
+    repo: https://github.com/shubhamss11020/Threads-Vault-db
     branch: data
     buildCommand: pip install -r requirements.txt
     startCommand: python mcp_server.py
@@ -50,7 +50,7 @@ services:
       - key: GITHUB_TOKEN
         sync: false
       - key: GITHUB_REPO_URL
-        value: https://github.com/eoxssecondbrain/claude-notes-vault.git
+        value: https://github.com/shubhamss11020/Threads-Vault-db.git
       - key: GIT_BRANCH
         value: data
       - key: OV2_GITHUB_TOKEN
