@@ -158,18 +158,34 @@ class _IdentityMiddleware:
             await self.app(scope, receive, send)
             return
 
+        method = scope.get("method", "GET").upper()
         path = scope["path"]
+
+        # Handle CORS preflight OPTIONS everywhere
+        if method == "OPTIONS":
+            from starlette.responses import PlainTextResponse
+            response = PlainTextResponse(
+                "OK",
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+                    "Access-Control-Allow-Headers": "*",
+                },
+            )
+            await response(scope, receive, send)
+            return
 
         # Bare root path: the health check, registered via @mcp.custom_route("/").
         # No secret involved — this is a public liveness probe, not vault data.
-        if path == "/":
+        if path in ("/", ""):
             await self.app(scope, receive, send)
             return
 
         # Leg 2: the follow-up tool-call POSTs. mcp.sse_app() built this URL
         # itself with no secret in it (see _session_users' docstring) — look
         # up identity by session_id instead of by path.
-        if path.startswith(_INTERNAL_MESSAGE_PATH):
+        if path.startswith(_INTERNAL_MESSAGE_PATH) or path == "/_internal/messages":
             query = scope.get("query_string", b"").decode()
             session_id = None
             for part in query.split("&"):
@@ -184,16 +200,13 @@ class _IdentityMiddleware:
                 _current_user.reset(token)
             return
 
-        # Leg 1: the initial SSE handshake, gated by the per-user secret.
-        parts = path.split("/", 2)
-        # parts: ["", "<secret>", "sse"]
-        if len(parts) < 3 or not parts[1]:
-            from starlette.responses import PlainTextResponse
-            response = PlainTextResponse("Not found", status_code=404)
-            await response(scope, receive, send)
-            return
+        # Leg 1: Parse the per-user secret from path.
+        # Normalize paths like /<secret>, /<secret>/, /<secret>/sse, /<secret>/sse/
+        stripped = path.strip("/")
+        parts = stripped.split("/", 1)
+        secret = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
 
-        secret, rest = parts[1], parts[2]
         username = CLAUDE_OV_USERS.get(secret)
         if username is None:
             from starlette.responses import PlainTextResponse
@@ -204,7 +217,7 @@ class _IdentityMiddleware:
         # ── HTTP API: POST /<secret>/api/save ─────────────────────────────
         # Used by the deterministic Stop hook to save transcripts without
         # going through the MCP protocol. Same contract as save_chat_transcript.
-        if rest == "api/save" and scope.get("method") == "POST":
+        if rest == "api/save" and method == "POST":
             body_parts = []
             while True:
                 msg = await receive()
@@ -232,6 +245,33 @@ class _IdentityMiddleware:
 
             from starlette.responses import JSONResponse
             resp = JSONResponse({"ok": True, "result": result})
+            await resp(scope, receive, send)
+            return
+
+        # If a client sends tool-call POST with session_id to /<secret>/...
+        query = scope.get("query_string", b"").decode()
+        if method == "POST" and "session_id=" in query:
+            session_id = None
+            for part in query.split("&"):
+                if part.startswith("session_id="):
+                    session_id = part[len("session_id="):]
+                    break
+            session_user = _session_users.get(session_id, username)
+            token = _current_user.set(session_user)
+            scope["path"] = _INTERNAL_MESSAGE_PATH
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _current_user.reset(token)
+            return
+
+        # If Claude connector validation sends a probe POST to /sse or base url without session_id
+        if method == "POST" and rest in ("sse", "", "messages"):
+            from starlette.responses import JSONResponse
+            resp = JSONResponse({
+                "jsonrpc": "2.0",
+                "result": {"status": "ok", "user": username, "transport": "sse"}
+            })
             await resp(scope, receive, send)
             return
 
@@ -873,5 +913,13 @@ if __name__ == "__main__":
     # with no hook to inject middleware — so the identity-resolving middleware
     # is wired in manually here instead: get the raw ASGI app, wrap it, run it.
     import uvicorn
+    from starlette.middleware.cors import CORSMiddleware
+
     app = _IdentityMiddleware(mcp.sse_app())
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    cors_app = CORSMiddleware(
+        app,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    uvicorn.run(cors_app, host="0.0.0.0", port=PORT)
