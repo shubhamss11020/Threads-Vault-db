@@ -296,11 +296,83 @@ class _IdentityMiddleware:
                 _current_user.reset(token)
             return
 
-        # If Claude connector validation sends a probe POST to /sse or base url without session_id
+        # If Claude connector validation or HTTP client sends a POST to /sse, /, or /messages without session_id
         if method == "POST" and rest in ("sse", "", "messages"):
             from starlette.responses import JSONResponse
+            body_parts = []
+            while True:
+                msg = await receive()
+                body_parts.append(msg.get("body", b""))
+                if not msg.get("more_body", False):
+                    break
+            try:
+                rpc_data = json.loads(b"".join(body_parts))
+            except Exception:
+                rpc_data = {}
+
+            req_id = rpc_data.get("id")
+            rpc_method = rpc_data.get("method", "")
+
+            # MCP Initialize
+            if rpc_method == "initialize":
+                protocol_ver = rpc_data.get("params", {}).get("protocolVersion", "2024-11-05")
+                resp = JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "protocolVersion": protocol_ver,
+                        "capabilities": {
+                            "experimental": {},
+                            "prompts": {"listChanged": False},
+                            "resources": {"subscribe": False, "listChanged": False},
+                            "tools": {"listChanged": False}
+                        },
+                        "serverInfo": {
+                            "name": "Claude Notes Vault",
+                            "version": "1.29.1"
+                        },
+                        "instructions": mcp.instructions
+                    }
+                })
+                await resp(scope, receive, send)
+                return
+
+            # MCP Initialized notification
+            if rpc_method == "notifications/initialized":
+                resp = JSONResponse({"jsonrpc": "2.0"}, status_code=200)
+                await resp(scope, receive, send)
+                return
+
+            # MCP List Tools
+            if rpc_method == "tools/list":
+                try:
+                    tools = await mcp.list_tools()
+                    tools_list = [
+                        t.model_dump(exclude_none=True) if hasattr(t, "model_dump") else t.__dict__
+                        for t in tools
+                    ]
+                except Exception:
+                    tools_list = []
+                resp = JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "tools": tools_list
+                    }
+                })
+                await resp(scope, receive, send)
+                return
+
+            # MCP Ping
+            if rpc_method == "ping":
+                resp = JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {}})
+                await resp(scope, receive, send)
+                return
+
+            # Default fallback for probing POST
             resp = JSONResponse({
                 "jsonrpc": "2.0",
+                "id": req_id,
                 "result": {"status": "ok", "user": username, "transport": "sse"}
             })
             await resp(scope, receive, send)
