@@ -5,10 +5,9 @@
 # agent-driven writes (save_chat_transcript, save_analysis, the SYNTHESIZE
 # workflow's chat-summary pages, and the CROSS-LINK workflow's OV2 xref
 # writes), so there's no webhook receiver, no cron, no persistent disk, and
-# no main/data branch split. All content lives on 'data'; 'main' would only
-# ever hold this same code, so keeping code and content on one branch is
-# fine here (unlike OV2, where a genuinely long multi-account pipeline run
-# needed to avoid retriggering its own mid-run redeploy).
+# no main/data branch split. v2 code + PostgreSQL lives on 'v2-pg' branch;
+# the original 'data' branch is preserved unchanged as the v1 Git-only system.
+# Code and content share the same branch (same tradeoff as v1).
 #
 # Each save is a single small file, so a self-triggered redeploy on every
 # push is an accepted tradeoff — same as OV2's mcp-server.
@@ -38,7 +37,7 @@ services:
     name: claude-notes-mcp-server
     runtime: python
     repo: https://github.com/shubhamss11020/Threads-Vault-db
-    branch: data
+    branch: v2-pg
     buildCommand: pip install -r requirements.txt
     startCommand: python mcp_server.py
     plan: starter
@@ -52,12 +51,14 @@ services:
       - key: GITHUB_REPO_URL
         value: https://github.com/shubhamss11020/Threads-Vault-db.git
       - key: GIT_BRANCH
-        value: data
+        value: v2-pg
       - key: OV2_GITHUB_TOKEN
         sync: false
       - key: OV2_REPO_URL
         value: https://github.com/eoxssecondbrain/raj-wiki-vault.git
       - key: OV2_BRANCH
         value: data
+      - key: DATABASE_URL
+        sync: false
       - key: OV2_CLONE_DIR
         value: /tmp/ov2-clone
